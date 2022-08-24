@@ -24,30 +24,26 @@ import requests
 #     - Error tolerant - Maintain operation despite errors (urllib, requests
 #       and BS errors)
 #     - Scalable - Multithreads / Processes
-# 2 - Save all diferente .pt domains
-#     - Avoid other root domains or
+# 2 v Save all diferente .pt domains
+#     v Avoid other root domains or
 #     - Acept pt.domain.com
-# 3 - Save all errors found
-# 4 - Use euristics to classify websites as e-commerce
-# 5 - Save one html file for each domain to distinguish e-commerce from not
+# 3 v Save all errors found
+# 4 v Use euristics to classify websites as e-commerce
+# 5 v Save one html file for each domain to distinguish e-commerce from not
 # 6 - Use as much bloking avoidance techniques:
-#     - Dynamically adjust the request rate to maximium alowed by the server
+#     - Dynamically adjust the request rate to maximium allowed by the server
 #       - HTTP Error "429 - Too Many Requests" with the bellow header
 #       - HTTP Header "Retry-After"
 #       - HTTP Header "x-ratelimit-limit" - Number of requests in 60 seconds
-#     - Use as much autentic headers as possible
+#     v Use as much autentic headers as possible
 #     - Crawl based on low trafic hours morning (2-8am of users/server) to
 #       avoid slow website
 #     - Crawl based on robots.txt
-#     - Passar a usar tldextract para permitir subdominios de nivel 3 .pt
 #     
-# Questions:
-# Structure the crawler as an object to be called from the console? like the
-# Visual Timer to allow start and stop? - Later
-
-#Problemas:
-#    Está a visitar paginas duplicadas: Não testa se o url já está na queue
-#    A queue parece estar atrasar o crawl por haver muitas threads a aceder-lhe
+# Issues to correct:
+#    - Is visiting duplicate webpages - Not cheking the queue for duplicates
+#    - Using a queue must be slowing the crawl for heaving lots of threads acessing it
+#    - Use tldextract to allow third level pt. subdomains 
 #-----------------------------------------------------------------------------
 
 # Constants
@@ -100,8 +96,6 @@ adapter = requests.adapters.HTTPAdapter(pool_connections=MAX_THREADS,
 session.mount('http://',adapter)
 session.mount('https://',adapter)
 
-logging.basicConfig(filename='example.log', level=logging.INFO)
-
 client = MongoClient(MONGOKEY)
 db = client.MAXUT
 
@@ -111,8 +105,11 @@ def errorStorage(queue):
     while True:
         try: 
             if not queue.empty():
+                print('no errorStorage')
                 error = {}
-                error['error'] = str(queue.get())
+                obj = queue.get()
+                error['error'] = obj['error']
+                error['url'] = obj['url']
                 matches = errors.count_documents(error)
                 if matches == 0:
                     errors.insert_one(error)
@@ -234,7 +231,10 @@ def crawlUrl(url):
             break
         except Exception as e:
             if i < TRIES-1:
-                errorQueue.put(e)
+                error = {}
+                error['error'] = str(e)
+                error['url'] = url
+                errorQueue.put(error)
                 sleep(3)
                 continue
             else:
@@ -270,7 +270,7 @@ def crawlUrl(url):
     
     # Insert links in queue
     for link in links:
-        follow.put(link,block=False)  ##### ATENÇÂO!!!! - Confirmar
+        follow.put(link)
     return
 
 # Algorithm
@@ -281,6 +281,7 @@ try:
     threading.Thread(target=ecomStorage,args=(ecomQueue,)).start()
     threading.Thread(target=threadManager,args=(follow,)).start()
 except Exception as e:
+    errorQueue.put(e)
     print(e)
 for seed in SEEDS:
     follow.put(seed)

@@ -1,6 +1,9 @@
 # gambot
 The web crawler whose goal is to find and store all e-commerce sites products and its key:value pairs
 
+### Patch 0.0.1
+- Added url to the error object to be stored
+
 ## Version 0.0.0
 - First "stable" version
 - Multithreaded crawler whose threads are created from links stored on a queue by each thread
