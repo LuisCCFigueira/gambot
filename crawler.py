@@ -13,9 +13,6 @@ from bs4 import Tag
 import requests
 # Aplication libraries
 
-# foi preciso instalar types-requests para calar warnings mas será apenas para thonny?
-# foi preciso instalar dnspython para calar warnings
-# deve ser preciso alterar o limie de threads por utilizador do Sistema operativo
 
 # ----------------------------------------------------------------------------
 # Functionalities:      
@@ -43,7 +40,15 @@ import requests
 # Issues to correct:
 #    - Is visiting duplicate webpages - Not cheking the queue for duplicates
 #    - Using a queue must be slowing the crawl for heaving lots of threads acessing it
-#    - Use tldextract to allow third level pt. subdomains 
+#    - Use tldextract to allow third level pt. subdomains
+#    - Find ways to Speed up the crawl (Ideas)
+#      - Use local database
+#      - Use async acess to database - speed up thread creation
+#      - Diferent architecture to separate asyncronouse operations (requests)
+#        and processing
+#        - Max threads possible request and whait for response to saturate bandwith
+#        - Other treads to process, access memory and disk
+#      
 #-----------------------------------------------------------------------------
 
 # Constants
@@ -71,7 +76,8 @@ EURISTICS = ['add to cart','add to bag','add to basket','adicionar à cesta',
              'adicionar ao cesto','adicionar ao carrinho','adicionar',
              'juntar ao carrinho','carrinho','comprar']
 SEEDS = ['https://melhores-sites.pt/melhores-sites-portugal.html',
-         'https://pt.trustpilot.com/categories']
+         'https://pt.trustpilot.com/categories',
+         'https://portal-sites.net/']
 MONGOKEY = ('mongodb+srv://LuisFigueira:'
             'Telecaster13@cluster0.rnnt0.mongodb.net/'
             'MAXUT?retryWrites=true&w=majority')
@@ -105,7 +111,6 @@ def errorStorage(queue):
     while True:
         try: 
             if not queue.empty():
-                print('no errorStorage')
                 error = {}
                 obj = queue.get()
                 error['error'] = obj['error']
@@ -115,7 +120,6 @@ def errorStorage(queue):
                     errors.insert_one(error)
         except Exception as e:
             errorQueue.put(e)
-            print(e)
             continue
 
 
@@ -135,7 +139,6 @@ def headersStorage(queue):
                             headers_DB.insert_one(obj)
         except Exception as e:
             errorQueue.put(e)
-            print(e)
             continue
     
 
@@ -151,7 +154,6 @@ def websitesStorage(queue):
                     websites.insert_one(website)
         except Exception as e:
             errorQueue.put(e)
-            print(e)
             continue 
 
 
@@ -166,7 +168,6 @@ def ecomStorage(queue):
                     ML_objects.insert_one(ML_object)
         except Exception as e:
             errorQueue.put(e)
-            print(e)
             continue 
 
 
@@ -180,7 +181,6 @@ def threadManager(queue):
                 threading.Thread(target=crawlUrl, args=(url,)).start()
         except Exception as e:
             errorQueue.put(e)
-            print(e)
             continue
             
 
@@ -282,6 +282,5 @@ try:
     threading.Thread(target=threadManager,args=(follow,)).start()
 except Exception as e:
     errorQueue.put(e)
-    print(e)
 for seed in SEEDS:
     follow.put(seed)

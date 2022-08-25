@@ -3,6 +3,8 @@ The web crawler whose goal is to find and store all e-commerce sites products an
 
 ### Patch 0.0.1
 - Added url to the error object to be stored
+- Removed block=True argument in queue.put() because was not tested yet
+- Removed log file creation
 
 ## Version 0.0.0
 - First "stable" version
