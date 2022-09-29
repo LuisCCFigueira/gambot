@@ -227,7 +227,7 @@ def crawlUrl(url):
             response = session.get(url,allow_redirects=True)
             break
         except Exception as e:
-            if i < TRIES-1:
+            if i < TRIES:
                 error = {}
                 error['error'] = str(e)
                 error['url'] = url
@@ -246,6 +246,10 @@ def crawlUrl(url):
     # Store website response headers if different than previous
     headers = dict(response.headers.items())
     headersQueue.put(headers)
+    
+    # Exit if http error status code
+    if response.status_code >= 400:
+        return
     
     soup = BS(response.text,'html.parser')
     
