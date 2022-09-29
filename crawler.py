@@ -13,7 +13,6 @@ from bs4 import Tag
 import requests
 # Aplication libraries
 
-
 # ----------------------------------------------------------------------------
 # Functionalities:      
 #
@@ -48,7 +47,7 @@ import requests
 #        and processing
 #        - Max threads possible request and whait for response to saturate bandwith
 #        - Other treads to process, access memory and disk
-#      
+#      - Use multiple processes instead of threads to use all CPU cores
 #-----------------------------------------------------------------------------
 
 # Constants
@@ -175,9 +174,7 @@ def threadManager(queue):
     while True:
         try:
             if not queue.empty() and threading.active_count() < MAX_THREADS:
-                start = time_ns()
                 url = queue.get()
-                stop = time_ns()
                 threading.Thread(target=crawlUrl, args=(url,)).start()
         except Exception as e:
             errorQueue.put(e)
@@ -195,14 +192,14 @@ def getLinks(soup,url):
     '''Returns a list with all valid urls based on the filterrig logic rules or 
        returns an empty list in case no links satisfy rules or no links exist 
      '''
-    tags = soup(href=True) 
+    tags = soup.body(href=True) 
     if tags is not None:
         links = [ urljoin(url,tag['href']) if urlparse(tag['href']).netloc == ''
                   else  tag['href']
                   for tag in tags if
                   ( ( ( urlparse(tag['href']).netloc != ''
                         and Path(urlparse(tag['href']).netloc).suffix in ALLOWED_DOMAINS  
-                        and Path(urlparse(tag['href']).path).suffix in ALLOWED_FILES ) # Rerver a alteração ao == '' para ALLOWED FILES
+                        and Path(urlparse(tag['href']).path).suffix in ALLOWED_FILES )
                       or
                       (urlparse(tag['href']).netloc == ''
                        and Path(urlparse(tag['href']).path).suffix in ALLOWED_FILES
