@@ -1,6 +1,14 @@
 # gambot
 The web crawler whose goal is to find and store all e-commerce sites products and its key:value pairs
 
+### Patch 0.0.2
+- Added native MongoDB database capability
+- Fixed logic that crawled urls more than once
+- Don't store >400 code responses
+- Fixed crawling links on the head tag
+- Added crawling info logs
+- 
+
 ### Patch 0.0.1
 - Added url to the error object to be stored
 - Removed block=True argument in queue.put() because was not tested yet

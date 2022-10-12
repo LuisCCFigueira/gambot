@@ -5,7 +5,7 @@ from queue import Queue
 #import multiprocessing
 import threading
 import logging
-from time import sleep, time_ns
+from time import sleep, time
 # 3rd party libraries
 from bs4 import BeautifulSoup as BS
 from pymongo import MongoClient
@@ -77,9 +77,10 @@ EURISTICS = ['add to cart','add to bag','add to basket','adicionar à cesta',
 SEEDS = ['https://melhores-sites.pt/melhores-sites-portugal.html',
          'https://pt.trustpilot.com/categories',
          'https://portal-sites.net/']
-MONGOKEY = ('mongodb+srv://LuisFigueira:'
+MONGOKEY_ATLAS = ('mongodb+srv://LuisFigueira:'
             'Telecaster13@cluster0.rnnt0.mongodb.net/'
             'MAXUT?retryWrites=true&w=majority')
+MONGOKEY = 'mongodb://localhost:27017/'
 ALLOWED_DOMAINS = ['.pt']
 ALLOWED_FILES = ['.html','']
 
@@ -105,6 +106,16 @@ client = MongoClient(MONGOKEY)
 db = client.MAXUT
 
 # Functions
+def info():
+    while True:
+        sleep(5)
+        stop = time()
+        print((f'{len(visited)} webpages visited - '
+              f'{threading.active_count()} active threads - '
+              f'{follow.qsize()} urls to be followed - '
+               f'{len(visited)//(stop-start)} crawled pages per second'))
+
+
 def errorStorage(queue):
     errors = db['errors']
     while True:
@@ -195,18 +206,26 @@ def getLinks(soup,url):
     tags = soup.body(href=True) 
     if tags is not None:
         links = [ urljoin(url,tag['href']) if urlparse(tag['href']).netloc == ''
+                  # If url doesn't have netloc assume is relative path so join to url
                   else  tag['href']
+                  # if url has url treat it as a url
                   for tag in tags if
+                      # if HAS netloc AND it's sufix is allowed AND is a path to an allowed file type
                   ( ( ( urlparse(tag['href']).netloc != ''
                         and Path(urlparse(tag['href']).netloc).suffix in ALLOWED_DOMAINS  
                         and Path(urlparse(tag['href']).path).suffix in ALLOWED_FILES )
                       or
+                      # If NOT have netloc (is relative path)
+                      # AND is an allowed file
+                      # AND this site is in the allowed domains
                       (urlparse(tag['href']).netloc == ''
                        and Path(urlparse(tag['href']).path).suffix in ALLOWED_FILES
                        and Path(urlparse(url).netloc).suffix in ALLOWED_DOMAINS) )
                     and
-                    (tag['href'] not in visited
-                     or urljoin(url,tag['href']) not in visited) )]
+                    ( (tag['href'] not in visited and tag['href'] not in follow.queue) 
+                     or
+                      (urljoin(url,tag['href']) not in visited
+                       and urljoin(url,tag['href']) not in follow.queue) ) )]
     else:
         return []
     return links
@@ -275,7 +294,9 @@ def crawlUrl(url):
     return
 
 # Algorithm
+start = time()
 try:
+    threading.Thread(target=info,args=()).start()
     threading.Thread(target=errorStorage,args=(errorQueue,)).start()
     threading.Thread(target=headersStorage,args=(headersQueue,)).start()
     threading.Thread(target=websitesStorage,args=(websitesQueue,)).start()
