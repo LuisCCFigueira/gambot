@@ -6,7 +6,6 @@ from queue import Queue
 import threading
 import logging
 from time import sleep, time
-
 # 3rd party libraries
 from bs4 import BeautifulSoup as BS
 from pymongo import MongoClient
@@ -91,7 +90,7 @@ ALLOWED_DOMAINS = ['pt',
                    'int.pt',
                    'publ.pt',
                    'com.pt',
-                   'nome.pt']
+                   'nome.pt',]
 
 # Variables
 visited = set()
@@ -170,6 +169,7 @@ def websitesStorage(queue):
                 website['url'] = queue.get()
                 matches = websites.count_documents(website)
                 if matches == 0:
+                    print(f'site {website} visitado')
                     websites.insert_one(website)
         except Exception as e:
             errorQueue.put(e)
@@ -236,8 +236,11 @@ def getLinks(soup,url):
                       # AND this site is in the allowed domains
                       (urlparse(tag['href']).netloc == ''
                        and Path(urlparse(tag['href']).path).suffix in ALLOWED_FILES
-                       and ( TLDExtract(url).suffix in ALLOWED_DOMAINS
-                             or TLDExtract(url).subdomain in ALLOWED_DOMAINS) ) )
+                       )
+                      or TLDExtract(tag['href']).subdomain == 'portal-sites')
+                       # Commented seems avoid impossible situation (that the page has not allowed domain)
+                       #and ( TLDExtract(url).suffix in ALLOWED_DOMAINS
+                       #     or TLDExtract(url).subdomain in ALLOWED_DOMAINS) ) )
                     and
                     # If it wasn't followed or is not scheduled for following
                     ( (tag['href'] not in visited and tag['href'] not in follow.queue) 
