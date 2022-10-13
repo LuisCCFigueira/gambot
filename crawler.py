@@ -6,11 +6,14 @@ from queue import Queue
 import threading
 import logging
 from time import sleep, time
+
 # 3rd party libraries
 from bs4 import BeautifulSoup as BS
 from pymongo import MongoClient
 from bs4 import Tag
+from tldextract import extract as TLDExtract
 import requests
+
 # Aplication libraries
 
 # ----------------------------------------------------------------------------
@@ -37,11 +40,8 @@ import requests
 #     - Crawl based on robots.txt
 #     
 # Issues to correct:
-#    - Is visiting duplicate webpages - Not cheking the queue for duplicates
 #    - Using a queue must be slowing the crawl for heaving lots of threads acessing it
-#    - Use tldextract to allow third level pt. subdomains
 #    - Find ways to Speed up the crawl (Ideas)
-#      - Use local database
 #      - Use async acess to database - speed up thread creation
 #      - Diferent architecture to separate asyncronouse operations (requests)
 #        and processing
@@ -81,8 +81,17 @@ MONGOKEY_ATLAS = ('mongodb+srv://LuisFigueira:'
             'Telecaster13@cluster0.rnnt0.mongodb.net/'
             'MAXUT?retryWrites=true&w=majority')
 MONGOKEY = 'mongodb://localhost:27017/'
-ALLOWED_DOMAINS = ['.pt']
-ALLOWED_FILES = ['.html','']
+ALLOWED_FILES = ['.html',
+                 '']
+ALLOWED_DOMAINS = ['pt',
+                   'net.pt',
+                   'gov.pt',
+                   'org.pt',
+                   'edu.pt',
+                   'int.pt',
+                   'publ.pt',
+                   'com.pt',
+                   'nome.pt']
 
 # Variables
 visited = set()
@@ -113,7 +122,7 @@ def info():
         print((f'{len(visited)} webpages visited - '
               f'{threading.active_count()} active threads - '
               f'{follow.qsize()} urls to be followed - '
-               f'{len(visited)//(stop-start)} crawled pages per second'))
+               f'{int(len(visited)//(stop-start))} crawled pages per second'))
 
 
 def errorStorage(queue):
@@ -203,7 +212,13 @@ def getLinks(soup,url):
     '''Returns a list with all valid urls based on the filterrig logic rules or 
        returns an empty list in case no links satisfy rules or no links exist 
      '''
-    tags = soup.body(href=True) 
+    #tags = soup.body(href=True)
+    
+    body = soup.body
+    if body is None:
+        return []
+    tags = body(href=True)
+    
     if tags is not None:
         links = [ urljoin(url,tag['href']) if urlparse(tag['href']).netloc == ''
                   # If url doesn't have netloc assume is relative path so join to url
@@ -212,16 +227,19 @@ def getLinks(soup,url):
                   for tag in tags if
                       # if HAS netloc AND it's sufix is allowed AND is a path to an allowed file type
                   ( ( ( urlparse(tag['href']).netloc != ''
-                        and Path(urlparse(tag['href']).netloc).suffix in ALLOWED_DOMAINS  
-                        and Path(urlparse(tag['href']).path).suffix in ALLOWED_FILES )
+                        and Path(urlparse(tag['href']).path).suffix in ALLOWED_FILES
+                        and ( TLDExtract(tag['href']).suffix in ALLOWED_DOMAINS
+                            or TLDExtract(tag['href']).subdomain in ALLOWED_DOMAINS ) )
                       or
                       # If NOT have netloc (is relative path)
                       # AND is an allowed file
                       # AND this site is in the allowed domains
                       (urlparse(tag['href']).netloc == ''
                        and Path(urlparse(tag['href']).path).suffix in ALLOWED_FILES
-                       and Path(urlparse(url).netloc).suffix in ALLOWED_DOMAINS) )
+                       and ( TLDExtract(url).suffix in ALLOWED_DOMAINS
+                             or TLDExtract(url).subdomain in ALLOWED_DOMAINS) ) )
                     and
+                    # If it wasn't followed or is not scheduled for following
                     ( (tag['href'] not in visited and tag['href'] not in follow.queue) 
                      or
                       (urljoin(url,tag['href']) not in visited
@@ -246,7 +264,7 @@ def crawlUrl(url):
             response = session.get(url,allow_redirects=True)
             break
         except Exception as e:
-            if i < TRIES:
+            if i < TRIES-1:
                 error = {}
                 error['error'] = str(e)
                 error['url'] = url
@@ -254,16 +272,21 @@ def crawlUrl(url):
                 sleep(3)
                 continue
             else:
-                return
+                return None
+        
     
     # Add webpage to visited
     visited.add(url)
     # Add website netloc to existent domains
-    netloc = urlparse(url).netloc
-    websitesQueue.put(netloc)
+    website = TLDExtract(url).fqdn
+    websitesQueue.put(website)
     
     # Store website response headers if different than previous
-    headers = dict(response.headers.items())
+    try:
+        headers = dict(response.headers.items())
+    except Exception as e:
+        print(f'O url que deu erro: {url}')
+        print(e)
     headersQueue.put(headers)
     
     # Exit if http error status code
