@@ -169,7 +169,6 @@ def websitesStorage(queue):
                 website['url'] = queue.get()
                 matches = websites.count_documents(website)
                 if matches == 0:
-                    print(f'site {website} visitado')
                     websites.insert_one(website)
         except Exception as e:
             errorQueue.put(e)
