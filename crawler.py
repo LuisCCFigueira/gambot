@@ -1,11 +1,13 @@
 # Standard libraries
+from time import sleep, time, perf_counter_ns
 from urllib.parse import urljoin, urlparse
 from pathlib import PurePosixPath as Path
+from collections import deque
 from queue import Queue
-#import multiprocessing
-import threading
+from multiprocessing import Process, Queue as ProcessQueue
+from threading import Thread, active_count
 import logging
-from time import sleep, time
+
 # 3rd party libraries
 from bs4 import BeautifulSoup as BS
 from pymongo import MongoClient
@@ -24,7 +26,7 @@ import requests
 #     - Scalable - Multithreads / Processes
 # 2 v Save all diferente .pt domains
 #     v Avoid other root domains or
-#     - Acept pt.domain.com
+#     v Acept pt.domain.com
 # 3 v Save all errors found
 # 4 v Use euristics to classify websites as e-commerce
 # 5 v Save one html file for each domain to distinguish e-commerce from not
@@ -39,7 +41,6 @@ import requests
 #     - Crawl based on robots.txt
 #     
 # Issues to correct:
-#    - Using a queue must be slowing the crawl for heaving lots of threads acessing it
 #    - Find ways to Speed up the crawl (Ideas)
 #      - Use async acess to database - speed up thread creation
 #      - Diferent architecture to separate asyncronouse operations (requests)
@@ -51,7 +52,7 @@ import requests
 
 # Constants
 TRIES = 5
-MAX_THREADS = 100
+MAX_THREADS = 103
 HEADERS = {'Accept':'text/html,application/xhtml+xml,application/xml;'
            'q=0.9,image/avif,image/webp,image/apng,*/*;'
            'q=0.8,application/signed-exchange;v=b3;q=0.9',
@@ -76,9 +77,9 @@ EURISTICS = ['add to cart','add to bag','add to basket','adicionar à cesta',
 SEEDS = ['https://melhores-sites.pt/melhores-sites-portugal.html',
          'https://pt.trustpilot.com/categories',
          'https://portal-sites.net/']
-MONGOKEY_ATLAS = ('mongodb+srv://LuisFigueira:'
-            'Telecaster13@cluster0.rnnt0.mongodb.net/'
-            'MAXUT?retryWrites=true&w=majority')
+#MONGOKEY_ATLAS = ('mongodb+srv://LuisFigueira:'
+#            'Telecaster13@cluster0.rnnt0.mongodb.net/'
+#           'MAXUT?retryWrites=true&w=majority')
 MONGOKEY = 'mongodb://localhost:27017/'
 ALLOWED_FILES = ['.html',
                  '']
@@ -93,38 +94,118 @@ ALLOWED_DOMAINS = ['pt',
                    'nome.pt',]
 
 # Variables
-visited = set()
+visited_urls = set()    # 
+visited_sites = set()  # Query se existe antes de inserir (100xmais rapido)
 
-# Objects
-errorQueue = Queue()
-headersQueue = Queue() 
-websitesQueue = Queue()
-ecomQueue = Queue()
-follow = Queue()
+# Deques
+follow_deque = deque()
+responses_queue = ProcessQueue()
+getLinks_queue = ProcessQueue()
+headers_queue = ProcessQueue()
+classify_queue = ProcessQueue()
+errors_queue = ProcessQueue()
 
+# Services initializations
 session = requests.Session()
 session.headers.update(HEADERS)
-
 adapter = requests.adapters.HTTPAdapter(pool_connections=MAX_THREADS,
                                         pool_maxsize=MAX_THREADS)
 session.mount('http://',adapter)
 session.mount('https://',adapter)
 
+# Será que é preciso? Ou apenas no final??
 client = MongoClient(MONGOKEY)
 db = client.MAXUT
 
 # Functions
 def info():
     while True:
-        sleep(5)
+        sleep(1)
         stop = time()
-        print((f'{len(visited)} webpages visited - '
-              f'{threading.active_count()} active threads - '
-              f'{follow.qsize()} urls to be followed - '
+        print((f'{len(visited_urls)} webpages visited - '
+              f'{active_count()} active threads - '
+              f'{follow_deque.qsize()} urls to be followed - '
                f'{int(len(visited)//(stop-start))} crawled pages per second'))
+        
 
+def threadLauncher(TRIES, session, follow_deque, responses_queue, errors_queue):
+    while True:
+        if not follow_deque.empty() and threading.active_count < MAX_THREADS:
+            url = follow_deque.popleft()
+            threading.Thread(target=requestThread,args=(TRIES, session, url, responses_queue, error_queue)).start()
+            print(f'THREAD do {url} lançada')
+            
+
+def responsesThread(TRIES, session, url, responses_queue, errors_queue):
+    for i in range(TRIES):
+        try:
+            response = session.get(url,allow_redirects=True)
+            break
+        except Exception as e:
+            print(f'erro: {e}')
+            if i < TRIES-1:
+                error = {}
+                error['error'] = str(e)
+                error['url'] = url
+                errors_queue.put(error)
+                sleep(3)
+                continue
+            else:
+                return
+    print(f'resposta do {url} recebida')
+    responses_queue.put(response)
+    return None
+
+
+def getLinks(getLinks_queue, follow_deque, visited_urls, visited_sites):
+    while True:
+        if not getLinks_queue.empty():
+            response = getLinks_queue.get()
+            url = response.url
+            visited_urls.add(url)
+            domain = TLDExtract(url).fqdn
+            if domain not in visited_sites:
+                visited_sites.add(domain)
+            if response.status_code >= 400:
+                continue
+            soup = BS(response.text,'html.parser')
+            body = soup.body
+            if body is None:
+                continue
+            tags = body(href=True)
+            if tags is not None:
+                links = [ urljoin(url,tag['href']) if urlparse(tag['href']).netloc == ''
+                          # If url doesn't have netloc assume is relative path so join to url
+                          else  tag['href']
+                          # if url has url treat it as a url
+                          for tag in tags if
+                              # if HAS netloc AND it's sufix is allowed AND is a path to an allowed file type
+                          ( ( ( urlparse(tag['href']).netloc != ''
+                                and Path(urlparse(tag['href']).path).suffix in ALLOWED_FILES
+                                and ( TLDExtract(tag['href']).suffix in ALLOWED_DOMAINS
+                                    or TLDExtract(tag['href']).subdomain in ALLOWED_DOMAINS ) )
+                              or
+                              # If NOT have netloc (is relative path)
+                              # AND is an allowed file
+                              # AND this site is in the allowed domains
+                              (urlparse(tag['href']).netloc == ''
+                               and Path(urlparse(tag['href']).path).suffix in ALLOWED_FILES
+                               )
+                              or TLDExtract(tag['href']).subdomain == 'portal-sites')
+                               # Commented seems avoid impossible situation (that the page has not allowed domain)
+                               #and ( TLDExtract(url).suffix in ALLOWED_DOMAINS
+                               #     or TLDExtract(url).subdomain in ALLOWED_DOMAINS) ) )
+                            and
+                            # If it wasn't followed or is not scheduled for following
+                            ( tag['href'] not in visited_urls
+                             or
+                              urljoin(url,tag['href']) not in visited ) ) ]
+                follow_deque.extend(links)
+            
 
 def errorStorage(queue):
+    client = MongoClient(MONGOKEY)
+    db = client.MAXUT
     errors = db['errors']
     while True:
         try: 
@@ -133,15 +214,17 @@ def errorStorage(queue):
                 obj = queue.get()
                 error['error'] = obj['error']
                 error['url'] = obj['url']
-                matches = errors.count_documents(error)
+                matches = queue.count_documents(error)
                 if matches == 0:
-                    errors.insert_one(error)
+                    queue.insert_one(error)
         except Exception as e:
-            errorQueue.put(e)
+            queue.put(e)
             continue
-
-
-def headersStorage(queue):
+        
+        
+def headersStorage(queue, errors_queue):
+    client = MongoClient(MONGOKEY)
+    db = client.MAXUT
     headers_DB = db['headers']
     while True:
         try:
@@ -156,49 +239,9 @@ def headersStorage(queue):
                         if matches == 0:
                             headers_DB.insert_one(obj)
         except Exception as e:
-            errorQueue.put(e)
+            errors_queue.put(e)
             continue
-    
 
-def websitesStorage(queue):
-    websites = db['websites']
-    while True:
-        try:
-            if not queue.empty():
-                website = {}
-                website['url'] = queue.get()
-                matches = websites.count_documents(website)
-                if matches == 0:
-                    websites.insert_one(website)
-        except Exception as e:
-            errorQueue.put(e)
-            continue 
-
-
-def ecomStorage(queue):  
-    ML_objects = db['e-com']
-    while True:
-        try:
-            if not queue.empty():
-                ML_object = queue.get()
-                matches = ML_objects.count_documents({'structure':ML_object['structure']})
-                if matches == 0:
-                    ML_objects.insert_one(ML_object)
-        except Exception as e:
-            errorQueue.put(e)
-            continue 
-
-
-def threadManager(queue):
-    while True:
-        try:
-            if not queue.empty() and threading.active_count() < MAX_THREADS:
-                url = queue.get()
-                threading.Thread(target=crawlUrl, args=(url,)).start()
-        except Exception as e:
-            errorQueue.put(e)
-            continue
-            
 
 def taggify(soup):
     for tag in soup:
@@ -207,127 +250,84 @@ def taggify(soup):
                                         ''.join(taggify(tag)),tag.name)
 
 
-def getLinks(soup,url):
-    '''Returns a list with all valid urls based on the filterrig logic rules or 
-       returns an empty list in case no links satisfy rules or no links exist 
-     '''
-    #tags = soup.body(href=True)
-    
-    body = soup.body
-    if body is None:
-        return []
-    tags = body(href=True)
-    
-    if tags is not None:
-        links = [ urljoin(url,tag['href']) if urlparse(tag['href']).netloc == ''
-                  # If url doesn't have netloc assume is relative path so join to url
-                  else  tag['href']
-                  # if url has url treat it as a url
-                  for tag in tags if
-                      # if HAS netloc AND it's sufix is allowed AND is a path to an allowed file type
-                  ( ( ( urlparse(tag['href']).netloc != ''
-                        and Path(urlparse(tag['href']).path).suffix in ALLOWED_FILES
-                        and ( TLDExtract(tag['href']).suffix in ALLOWED_DOMAINS
-                            or TLDExtract(tag['href']).subdomain in ALLOWED_DOMAINS ) )
-                      or
-                      # If NOT have netloc (is relative path)
-                      # AND is an allowed file
-                      # AND this site is in the allowed domains
-                      (urlparse(tag['href']).netloc == ''
-                       and Path(urlparse(tag['href']).path).suffix in ALLOWED_FILES
-                       )
-                      or TLDExtract(tag['href']).subdomain == 'portal-sites')
-                       # Commented seems avoid impossible situation (that the page has not allowed domain)
-                       #and ( TLDExtract(url).suffix in ALLOWED_DOMAINS
-                       #     or TLDExtract(url).subdomain in ALLOWED_DOMAINS) ) )
-                    and
-                    # If it wasn't followed or is not scheduled for following
-                    ( (tag['href'] not in visited and tag['href'] not in follow.queue) 
-                     or
-                      (urljoin(url,tag['href']) not in visited
-                       and urljoin(url,tag['href']) not in follow.queue) ) )]
-    else:
-        return []
-    return links
+def classify(queue, errors_queue):
+    '''Find different html structures, classify them as e-commerce or not and store on Database'''
+    client = MongoClient(MONGOKEY)
+    db = client.MAXUT
+    ML_objects = db['e-com']
+    while True:
+        if not queue.empty():
+            response = queue.get()
+            url = response.url
+            soup = BS(response.text,'html.parser')
+            body = soup.body
+            if body is None:
+                continue
+            structure = ''.join(taggify(soup))
+            classification = False
+            for string in soup.stripped_strings:
+                if string in EURISTICS:
+                    classification = False
+            # Store html structure, url and classification
+            url_infos = {}
+            url_infos['structure'] = structure
+            url_infos['url'] = url
+            url_infos['classification'] = classification
+            try:
+                matches = ML_objects.count_documents({'structure':url_infos['structure']})
+                if matches == 0:
+                    ML_objects.insert_one(url_infos)
+            except Exception as e:
+                errors_queue.put(e)
 
 
-def classify(soup):
-    '''Clasify a webpage as product (True) or not (False)'''
-    for string in soup.stripped_strings:
-        if string in EURISTICS:
-            return True
-    return False
-    
-
-def crawlUrl(url):
-    # Get webpage
-    for i in range(TRIES):
-        try:
-            response = session.get(url,allow_redirects=True)
-            break
-        except Exception as e:
-            if i < TRIES-1:
-                error = {}
-                error['error'] = str(e)
-                error['url'] = url
-                errorQueue.put(error)
-                sleep(3)
+def finalizer(follow_deque, responses_queue, visited_urls, visited_sites):
+    '''Transfers visited urls and sites sets to the database after checking for empty deques
+        and queues, I.E. end of program'''
+    flag = False
+    while True:
+        sleep(10)
+        if len(follow_deque) == 0 and responses_queue.qsize() == 0:
+            if flag == False:
+                flag = True
                 continue
             else:
-                return None
-        
-    
-    # Add webpage to visited
-    visited.add(url)
-    # Add website netloc to existent domains
-    website = TLDExtract(url).fqdn
-    websitesQueue.put(website)
-    
-    # Store website response headers if different than previous
-    try:
-        headers = dict(response.headers.items())
-    except Exception as e:
-        print(f'O url que deu erro: {url}')
-        print(e)
-    headersQueue.put(headers)
-    
-    # Exit if http error status code
-    if response.status_code >= 400:
-        return
-    
-    soup = BS(response.text,'html.parser')
-    
-    # Get HTML body structure
-    structure = ''.join(taggify(soup))
-    
-    # Classify webpage as e-commerce product page or not
-    webpage_classification = classify(soup)
-    
-    # Store html structure, url and classification
-    ML_object = {}
-    ML_object['structure'] = structure
-    ML_object['url'] = url
-    ML_object['classification'] = webpage_classification
-    ecomQueue.put(ML_object)
-    
-    # Get all links that can be followed
-    links = getLinks(soup,url)
-    
-    # Insert links in queue
-    for link in links:
-        follow.put(link)
-    return
+                # DEVELOP:
+                client = MongoClient(MONGOKEY)
+                db = client.MAXUT
+                sites = db['sites']
+                urls = db['urls']
+                sites
+                # Save sets in the database
+                # Turn processes off
+                # Print Crawl Info
+                # Exit program
+        elif flag == True:
+            flag = False
 
 # Algorithm
 start = time()
 try:
-    threading.Thread(target=info,args=()).start()
-    threading.Thread(target=errorStorage,args=(errorQueue,)).start()
-    threading.Thread(target=headersStorage,args=(headersQueue,)).start()
-    threading.Thread(target=websitesStorage,args=(websitesQueue,)).start()
-    threading.Thread(target=ecomStorage,args=(ecomQueue,)).start()
-    threading.Thread(target=threadManager,args=(follow,)).start()
+    if __name__ == '__main__':
+        p = Process(target=errorStorage,args=(errors_queue,))
+        p.start()
+        p.join()
+        p = Process(target=headersStorage,args=(queue, errors_queue,))
+        p.start()
+        p.join()
+        Process(target=classify,args=(queue, errors_queue,))
+        p.start()
+        p.join()
+        Process(target=getLinks,args=(getLinks_queue, follow_deque, visited_urls, visited_sites,))
+        p.start()
+        p.join()
+        Process(target=responsesThread,args=(TRIES, session, url, responses_queue, errors_queue,))
+        p.start()
+        p.join()
+        Process(target=threadLauncher, args=(TRIES, session, follow_deque, responses_queue, errors_queue,))
+        p.start()
+        p.join()
 except Exception as e:
-    errorQueue.put(e)
-for seed in SEEDS:
-    follow.put(seed)
+    errors_queue.put(e)
+follow_deque.extend(SEEDS)
+finalizer(follow_deque, responses_queue, visited_urls, visited_sites)
