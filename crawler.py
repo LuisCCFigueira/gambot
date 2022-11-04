@@ -2,11 +2,8 @@
 from time import sleep, time, perf_counter_ns
 from urllib.parse import urljoin, urlparse
 from pathlib import PurePosixPath as Path
-from collections import deque
-from queue import Queue
-from multiprocessing import Process, Queue as ProcessQueue
+from multiprocessing import Value, Process, Queue
 from threading import Thread, active_count
-import logging
 
 # 3rd party libraries
 from bs4 import BeautifulSoup as BS
@@ -14,6 +11,7 @@ from pymongo import MongoClient
 from bs4 import Tag
 from tldextract import extract as TLDExtract
 import requests
+import psutil
 
 # Aplication libraries
 
@@ -52,7 +50,7 @@ import requests
 
 # Constants
 TRIES = 5
-MAX_THREADS = 103
+MAX_THREADS = 500
 HEADERS = {'Accept':'text/html,application/xhtml+xml,application/xml;'
            'q=0.9,image/avif,image/webp,image/apng,*/*;'
            'q=0.8,application/signed-exchange;v=b3;q=0.9',
@@ -77,9 +75,6 @@ EURISTICS = ['add to cart','add to bag','add to basket','adicionar à cesta',
 SEEDS = ['https://melhores-sites.pt/melhores-sites-portugal.html',
          'https://pt.trustpilot.com/categories',
          'https://portal-sites.net/']
-#MONGOKEY_ATLAS = ('mongodb+srv://LuisFigueira:'
-#            'Telecaster13@cluster0.rnnt0.mongodb.net/'
-#           'MAXUT?retryWrites=true&w=majority')
 MONGOKEY = 'mongodb://localhost:27017/'
 ALLOWED_FILES = ['.html',
                  '']
@@ -94,16 +89,14 @@ ALLOWED_DOMAINS = ['pt',
                    'nome.pt',]
 
 # Variables
-visited_urls = set()    # 
-visited_sites = set()  # Query se existe antes de inserir (100xmais rapido)
+crawling = True
 
-# Deques
-follow_deque = deque()
-responses_queue = ProcessQueue()
-getLinks_queue = ProcessQueue()
-headers_queue = ProcessQueue()
-classify_queue = ProcessQueue()
-errors_queue = ProcessQueue()
+# Queues
+responses_queue = Queue()
+getLinks_queue = Queue()
+classify_queue = Queue()
+print_queue = Queue()
+follow = Queue()
 
 # Services initializations
 session = requests.Session()
@@ -113,217 +106,244 @@ adapter = requests.adapters.HTTPAdapter(pool_connections=MAX_THREADS,
 session.mount('http://',adapter)
 session.mount('https://',adapter)
 
-# Será que é preciso? Ou apenas no final??
 client = MongoClient(MONGOKEY)
 db = client.MAXUT
+names = db.list_collection_names()
+for name in names:
+    db.drop_collection(name)
+
 
 # Functions
-def info():
-    while True:
-        sleep(1)
-        stop = time()
-        print((f'{len(visited_urls)} webpages visited - '
-              f'{active_count()} active threads - '
-              f'{follow_deque.qsize()} urls to be followed - '
-               f'{int(len(visited)//(stop-start))} crawled pages per second'))
-        
-
-def threadLauncher(TRIES, session, follow_deque, responses_queue, errors_queue):
-    while True:
-        if not follow_deque.empty() and threading.active_count < MAX_THREADS:
-            url = follow_deque.popleft()
-            threading.Thread(target=requestThread,args=(TRIES, session, url, responses_queue, error_queue)).start()
-            print(f'THREAD do {url} lançada')
-            
-
-def responsesThread(TRIES, session, url, responses_queue, errors_queue):
-    for i in range(TRIES):
+def info(visited_urls,follow):
+    global crawling
+    while crawling == True:
+        print(f'[info] - crawling = {crawling}')
         try:
-            response = session.get(url,allow_redirects=True)
-            break
+            sleep(5)
+            stop = time()
+            print((f'\n----- STATS  -----\n{visited_urls.value} Total responses processed - '
+                f'{active_count()} active threads - '
+                f'{follow.qsize()} urls to be followed - '
+                f'{(visited_urls.value)//(stop-start)} responses processed per second\n\n'))
         except Exception as e:
-            print(f'erro: {e}')
-            if i < TRIES-1:
-                error = {}
-                error['error'] = str(e)
-                error['url'] = url
-                errors_queue.put(error)
-                sleep(3)
-                continue
-            else:
-                return
-    print(f'resposta do {url} recebida')
+            continue
+    else:
+        return
+       
+
+# Lança a aprox 30 por segundo
+def threadLauncher(TRIES, session, follow, responses_queue):
+    global crawling
+    while crawling == True:
+        try:
+            if not follow.empty() and active_count() < MAX_THREADS:
+                start = perf_counter_ns() 
+                url = follow.get()          
+                Thread(target=requestThread,args=(session, url, responses_queue)).start()
+        except Exception:
+            continue
+    else:
+        return
+
+
+def requestThread(session, url, responses_queue):
+    try:
+        response = session.get(url,allow_redirects=True)
+    except Exception as e:
+        return
     responses_queue.put(response)
-    return None
 
 
-def getLinks(getLinks_queue, follow_deque, visited_urls, visited_sites):
-    while True:
-        if not getLinks_queue.empty():
-            response = getLinks_queue.get()
-            url = response.url
-            visited_urls.add(url)
-            domain = TLDExtract(url).fqdn
-            if domain not in visited_sites:
-                visited_sites.add(domain)
-            if response.status_code >= 400:
-                continue
-            soup = BS(response.text,'html.parser')
-            body = soup.body
-            if body is None:
-                continue
-            tags = body(href=True)
-            if tags is not None:
-                links = [ urljoin(url,tag['href']) if urlparse(tag['href']).netloc == ''
+# Não atrasa o crawl
+def responsesThread(responses_queue, getLinks_queue, classify_queue):
+    global crawling
+    while crawling == True:
+        if not responses_queue.empty():
+            response = responses_queue.get()
+            getLinks_queue.put(response)
+            classify_queue.put(response)
+    else:
+        return
+            
+            
+# Up to 250+ times faster than loop implementation
+def sacaLinks(text,lista):
+    parts = text.partition('href')
+    if parts[1] == '':
+        return lista
+    link = parts[2].split('"',2)
+    lista.append(link[1])
+    if len(link) == 3 and link[2] != '':
+        sacaLinks(link[2],lista)
+        
+    
+def getLinks(getLinks_queue, follow, visited_urls_value, getLinksFlag):
+    visited_urls = set() 
+    visited_sites = set()
+    while getLinksFlag.value == 0:
+        try:
+            if not getLinks_queue.empty():
+                response = getLinks_queue.get()
+                url = response.url
+                visited_urls.add(url)
+                visited_urls_value.value = len(visited_urls)
+                domain = TLDExtract(url).fqdn
+                if domain not in visited_sites:
+                    visited_sites.add(domain)
+                if response.status_code >= 400:
+                    continue
+                body = response.text.partition('<body>')[2]
+                tags = []
+                sacaLinks(body,tags)
+                links = [ urljoin(url,tag) if urlparse(tag).netloc == ''
                           # If url doesn't have netloc assume is relative path so join to url
-                          else  tag['href']
+                          else  tag
                           # if url has url treat it as a url
                           for tag in tags if
                               # if HAS netloc AND it's sufix is allowed AND is a path to an allowed file type
-                          ( ( ( urlparse(tag['href']).netloc != ''
-                                and Path(urlparse(tag['href']).path).suffix in ALLOWED_FILES
-                                and ( TLDExtract(tag['href']).suffix in ALLOWED_DOMAINS
-                                    or TLDExtract(tag['href']).subdomain in ALLOWED_DOMAINS ) )
+                          ( ( ( urlparse(tag).netloc != ''
+                                and Path(urlparse(tag).path).suffix in ALLOWED_FILES
+                                and ( TLDExtract(tag).suffix in ALLOWED_DOMAINS
+                                    or TLDExtract(tag).subdomain in ALLOWED_DOMAINS ) )
                               or
                               # If NOT have netloc (is relative path)
                               # AND is an allowed file
                               # AND this site is in the allowed domains
-                              (urlparse(tag['href']).netloc == ''
-                               and Path(urlparse(tag['href']).path).suffix in ALLOWED_FILES
+                              (urlparse(tag).netloc == ''
+                               and Path(urlparse(tag).path).suffix in ALLOWED_FILES
                                )
-                              or TLDExtract(tag['href']).subdomain == 'portal-sites')
+                              or TLDExtract(tag).subdomain == 'portal-sites')
                                # Commented seems avoid impossible situation (that the page has not allowed domain)
                                #and ( TLDExtract(url).suffix in ALLOWED_DOMAINS
                                #     or TLDExtract(url).subdomain in ALLOWED_DOMAINS) ) )
                             and
                             # If it wasn't followed or is not scheduled for following
-                            ( tag['href'] not in visited_urls
+                            ( tag not in visited_urls
                              or
-                              urljoin(url,tag['href']) not in visited ) ) ]
-                follow_deque.extend(links)
-            
-
-def errorStorage(queue):
-    client = MongoClient(MONGOKEY)
-    db = client.MAXUT
-    errors = db['errors']
-    while True:
-        try: 
-            if not queue.empty():
-                error = {}
-                obj = queue.get()
-                error['error'] = obj['error']
-                error['url'] = obj['url']
-                matches = queue.count_documents(error)
-                if matches == 0:
-                    queue.insert_one(error)
-        except Exception as e:
-            queue.put(e)
+                              urljoin(url,tag) not in visited_urls ) ) ]
+                for link in links:
+                    follow.put(link)
+        except Exception:
             continue
+    else:
+        print(f'[getLinks] - No processo de saida')
+        client = MongoClient(MONGOKEY)
+        db = client.MAXUT
+        visited = db['visited_sites']
+        for url in visited_sites:
+            visited.insert_one({'url':url})
+        getLinksFlag.value = 0
+        return
         
-        
-def headersStorage(queue, errors_queue):
-    client = MongoClient(MONGOKEY)
-    db = client.MAXUT
-    headers_DB = db['headers']
+
+def htmlStructure(html):
+    string = ''
     while True:
+        parts = html.partition('</')
+        if parts[1] == '':
+            return string
+        split = parts[2].split('>',1)
+        string += split[0]
+        html = split[1]
+
+
+def classify(queue, flag):
+    '''Find different html structures, classify them as e-commerce or not and store on Database'''
+    ML_objects = []
+    structures = set()
+    while flag.value == 0:
         try:
             if not queue.empty():
-                headers = queue.get()
-                for header in headers:
-                    if header not in ['Date','Expires']:
-                        obj = {}
-                        obj['header'] = header
-                        obj['value'] = headers[header]
-                        matches = headers_DB.count_documents(obj)
-                        if matches == 0:
-                            headers_DB.insert_one(obj)
-        except Exception as e:
-            errors_queue.put(e)
+                response = queue.get()
+                url = response.url
+                body = response.text.partition('<main')
+                if body[1] == '':
+                    body = response.text.partition('<body>')[2]
+                else:
+                    body = body[2].partition('</main>')[0]
+                structure = htmlStructure(body)
+                if structure not in structures:
+                    structures.add(structure)
+                    ML_Object = {}
+                    ML_Object['url'] = url
+                    ML_Object['html'] = response.text
+                    ML_objects.append(ML_Object)
+        except Exception:
             continue
+    else:
+        print(f'[classify] - Processo de saida')
+        client = MongoClient(MONGOKEY)
+        db = client.MAXUT
+        ecom = db['e-com']
+        ecom.insert_many(ML_objects)
+        flag.value = 0
+        return
+    
 
-
-def taggify(soup):
-    for tag in soup:
-        if isinstance(tag,Tag):
-            yield '<{}>{}</{}>'.format(tag.name,
-                                        ''.join(taggify(tag)),tag.name)
-
-
-def classify(queue, errors_queue):
-    '''Find different html structures, classify them as e-commerce or not and store on Database'''
-    client = MongoClient(MONGOKEY)
-    db = client.MAXUT
-    ML_objects = db['e-com']
-    while True:
-        if not queue.empty():
-            response = queue.get()
-            url = response.url
-            soup = BS(response.text,'html.parser')
-            body = soup.body
-            if body is None:
-                continue
-            structure = ''.join(taggify(soup))
-            classification = False
-            for string in soup.stripped_strings:
-                if string in EURISTICS:
-                    classification = False
-            # Store html structure, url and classification
-            url_infos = {}
-            url_infos['structure'] = structure
-            url_infos['url'] = url
-            url_infos['classification'] = classification
-            try:
-                matches = ML_objects.count_documents({'structure':url_infos['structure']})
-                if matches == 0:
-                    ML_objects.insert_one(url_infos)
-            except Exception as e:
-                errors_queue.put(e)
-
-
-def finalizer(follow_deque, responses_queue, visited_urls, visited_sites):
+getLinks
+def finalizer(follow_queue, responses_queue, getLinks_queue, classify_queue,getLinksFlag, classifyFlag, visited_urls):
     '''Transfers visited urls and sites sets to the database after checking for empty deques
         and queues, I.E. end of program'''
     flag = False
+    global crawling
     while True:
-        sleep(10)
-        if len(follow_deque) == 0 and responses_queue.qsize() == 0:
-            if flag == False:
-                flag = True
-                continue
-            else:
-                # DEVELOP:
-                client = MongoClient(MONGOKEY)
-                db = client.MAXUT
-                sites = db['sites']
-                urls = db['urls']
-                sites
-                # Save sets in the database
-                # Turn processes off
-                # Print Crawl Info
-                # Exit program
-        elif flag == True:
-            flag = False
+        try:
+            sleep(10)
+            if (follow_queue.qsize() == 0 
+            and responses_queue.qsize() == 0 
+            and getLinks_queue.qsize() == 0
+            and classify_queue.qsize() == 0):
+                if flag == False:
+                    flag = True
+                    continue
+                else:
+                    stop = perf_counter_ns() - 7200000000000
+                    print(f'--------- CRAWL END ---------')
+                    print(f'Duration: {((stop-start)//1000000000)/(60/(60//24))} days')
+                    print(f'Urls crawled: {visited_urls.value}')
+                    print(f'Urls per second: {visited_urls.value/(stop-start//1000000000)}')
+                    print(f'Downloading data to Database... Whait for it to end')
+                    crawling = False
+                    getLinksFlag.value = 1
+                    classifyFlag.value = 1
+                    while True:
+                        sleep(1)
+                        if getLinksFlag.value == 0 and classifyFlag.value == 0:
+                            return
+            elif flag == True:
+                flag = False
+        except Exception as e:
+            print(f'[finalizer] - Error: {e}')
+            continue
 
 # Algorithm
 start = time()
 try:
     if __name__ == '__main__':
+        visited_urls = Value('i',0)
+        getLinksFlag = Value('i',0)
+        classifyFlag = Value('i',0)
         processes = []
-        processes.append(Process(target=errorStorage,args=(errors_queue,)))
-        processes.append(Process(target=headersStorage,args=(queue, errors_queue,)))
-        processes.append(Process(target=classify,args=(queue, errors_queue,)))
-        processes.append(Process(target=getLinks,args=(getLinks_queue, follow_deque, visited_urls, visited_sites,)))
-        processes.append(Process(target=responsesThread,args=(TRIES, session, url, responses_queue, errors_queue,)))
-        processes.append(Process(target=threadLauncher, args=(TRIES, session, follow_deque, responses_queue, errors_queue,)))
-        print(f'depois de append de todos os processos')
+        processes.append(Process(target=classify,args=(classify_queue, classifyFlag),name='classify'))
+        processes.append(Process(target=getLinks,args=(getLinks_queue, follow, visited_urls, getLinksFlag),name='getLinks'))
+        Thread(target=threadLauncher,args=(TRIES, session, follow, responses_queue,)).start()
+        Thread(target=info,args=(visited_urls,follow,)).start()
+        Thread(target=responsesThread,args=(responses_queue, getLinks_queue, classify_queue,)).start()
         for p in processes:
             p.start()
-        print(f'depois do start de todos os processos')
-        follow_deque.extend(SEEDS)
-        print(f'Depois do follow_deque.extend')
-        for p in processes:
-            p.join()
+            if p.name == 'getLinks':
+                pid = p.pid
+                psu = psutil.Process(pid)
+                psu.cpu_affinity([3])
+                print(f'New CPU affinity for getLinks:{psu.cpu_affinity()}')
+            if p.name == 'classify':
+                pid = p.pid
+                psu = psutil.Process(pid)
+                psu.cpu_affinity([2])
+                print(f'New CPU affinity for classify:{psu.cpu_affinity()}')
+        for seed in SEEDS:
+            follow.put(seed)
 except Exception as e:
-    errors_queue.put(e)
-finalizer(follow_deque, responses_queue, visited_urls, visited_sites)
+    print(f'CRITICAL ERROR - Processes or Threaads not launched: {e}')
+
+finalizer(follow, responses_queue, getLinks_queue, classify_queue, getLinksFlag, classifyFlag, visited_urls)
