@@ -4,6 +4,8 @@ from urllib.parse import urljoin, urlparse
 from pathlib import PurePosixPath as Path
 from multiprocessing import Value, Process, Queue
 from threading import Thread, active_count
+import sqlite3
+import os
 
 # 3rd party libraries
 from bs4 import BeautifulSoup as BS
@@ -106,11 +108,9 @@ adapter = requests.adapters.HTTPAdapter(pool_connections=MAX_THREADS,
 session.mount('http://',adapter)
 session.mount('https://',adapter)
 
-client = MongoClient(MONGOKEY)
-db = client.MAXUT
-names = db.list_collection_names()
-for name in names:
-    db.drop_collection(name)
+
+if 'Crawler.db' in os.listdir():
+    os.remove('Crawler.db')
 
 
 # Functions
@@ -195,43 +195,46 @@ def getLinks(getLinks_queue, follow, visited_urls_value, getLinksFlag):
                 body = response.text.partition('<body>')[2]
                 tags = []
                 sacaLinks(body,tags)
-                links = [ urljoin(url,tag) if urlparse(tag).netloc == ''
-                          # If url doesn't have netloc assume is relative path so join to url
-                          else  tag
-                          # if url has url treat it as a url
-                          for tag in tags if
-                              # if HAS netloc AND it's sufix is allowed AND is a path to an allowed file type
-                          ( ( ( urlparse(tag).netloc != ''
-                                and Path(urlparse(tag).path).suffix in ALLOWED_FILES
-                                and ( TLDExtract(tag).suffix in ALLOWED_DOMAINS
-                                    or TLDExtract(tag).subdomain in ALLOWED_DOMAINS ) )
-                              or
-                              # If NOT have netloc (is relative path)
-                              # AND is an allowed file
-                              # AND this site is in the allowed domains
-                              (urlparse(tag).netloc == ''
-                               and Path(urlparse(tag).path).suffix in ALLOWED_FILES
-                               )
-                              or TLDExtract(tag).subdomain == 'portal-sites')
-                               # Commented seems avoid impossible situation (that the page has not allowed domain)
-                               #and ( TLDExtract(url).suffix in ALLOWED_DOMAINS
-                               #     or TLDExtract(url).subdomain in ALLOWED_DOMAINS) ) )
-                            and
-                            # If it wasn't followed or is not scheduled for following
-                            ( tag not in visited_urls
-                             or
-                              urljoin(url,tag) not in visited_urls ) ) ]
+                links = []
+#                 links = [ urljoin(url,tag) if urlparse(tag).netloc == ''
+#                           # If url doesn't have netloc assume is relative path so join to url
+#                           else  tag
+#                           # if url has url treat it as a url
+#                           for tag in tags if
+#                               # if HAS netloc AND it's sufix is allowed AND is a path to an allowed file type
+#                           ( ( ( urlparse(tag).netloc != ''
+#                                 and Path(urlparse(tag).path).suffix in ALLOWED_FILES
+#                                 and ( TLDExtract(tag).suffix in ALLOWED_DOMAINS
+#                                     or TLDExtract(tag).subdomain in ALLOWED_DOMAINS ) )
+#                               or
+#                               # If NOT have netloc (is relative path)
+#                               # AND is an allowed file
+#                               # AND this site is in the allowed domains
+#                               (urlparse(tag).netloc == ''
+#                                and Path(urlparse(tag).path).suffix in ALLOWED_FILES
+#                                )
+#                               or TLDExtract(tag).subdomain == 'portal-sites')
+#                                # Commented seems avoid impossible situation (that the page has not allowed domain)
+#                                #and ( TLDExtract(url).suffix in ALLOWED_DOMAINS
+#                                #     or TLDExtract(url).subdomain in ALLOWED_DOMAINS) ) )
+#                             and
+#                             # If it wasn't followed or is not scheduled for following
+#                             ( tag not in visited_urls
+#                              or
+#                               urljoin(url,tag) not in visited_urls ) ) ]
                 for link in links:
                     follow.put(link)
         except Exception:
             continue
     else:
         print(f'[getLinks] - No processo de saida')
-        client = MongoClient(MONGOKEY)
-        db = client.MAXUT
-        visited = db['visited_sites']
-        for url in visited_sites:
-            visited.insert_one({'url':url})
+        conection = sqlite3.connect('Crawler.db')
+        cursor = conection.cursor()
+        cursor.execute('CREATE TABLE visited(domainName)')
+        cursor.executemany('INSERT INTO visited VALUES(?)', list(visited_sites))
+        conection.commit()
+        cursor.close()
+        conection.close()
         getLinksFlag.value = 0
         return
         
@@ -264,23 +267,23 @@ def classify(queue, flag):
                 structure = htmlStructure(body)
                 if structure not in structures:
                     structures.add(structure)
-                    ML_Object = {}
-                    ML_Object['url'] = url
-                    ML_Object['html'] = response.text
+                    ML_Object = (structure, url, response.text)
                     ML_objects.append(ML_Object)
         except Exception:
             continue
     else:
         print(f'[classify] - Processo de saida')
-        client = MongoClient(MONGOKEY)
-        db = client.MAXUT
-        ecom = db['e-com']
-        ecom.insert_many(ML_objects)
+        conection = sqlite3.connect('Crawler.db')
+        cursor = conection.cursor()
+        cursor.execute('CREATE TABLE ecom(structure,url,html)')
+        cursor.executemany('INSERT INTO visited VALUES(?,?,?)', ML_objects)
+        conection.commit()
+        cursor.close()
+        conection.close()
         flag.value = 0
         return
     
 
-getLinks
 def finalizer(follow_queue, responses_queue, getLinks_queue, classify_queue,getLinksFlag, classifyFlag, visited_urls):
     '''Transfers visited urls and sites sets to the database after checking for empty deques
         and queues, I.E. end of program'''
