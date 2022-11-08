@@ -231,7 +231,8 @@ def getLinks(getLinks_queue, follow, visited_urls_value, getLinksFlag):
         conection = sqlite3.connect('Crawler.db')
         cursor = conection.cursor()
         cursor.execute('CREATE TABLE visited(domainName)')
-        cursor.executemany('INSERT INTO visited VALUES(?)', list(visited_sites))
+        for i in visited_sites:
+            cursor.execute('INSERT INTO visited VALUES(?)', i)
         conection.commit()
         cursor.close()
         conection.close()
@@ -276,7 +277,7 @@ def classify(queue, flag):
         conection = sqlite3.connect('Crawler.db')
         cursor = conection.cursor()
         cursor.execute('CREATE TABLE ecom(structure,url,html)')
-        cursor.executemany('INSERT INTO visited VALUES(?,?,?)', ML_objects)
+        cursor.executemany('INSERT INTO ecom VALUES(?,?,?)', ML_objects)
         conection.commit()
         cursor.close()
         conection.close()
